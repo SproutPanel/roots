@@ -52,16 +52,16 @@ docker:
   socket: "/var/run/docker.sock"      # Docker socket path (auto-detected)
   network: "roots_network"            # Docker network for containers (default: roots_network)
 
-# Storage paths
+# Storage paths (defaults vary by OS, see below)
 storage:
-  servers: "~/.local/share/roots/servers"  # Server data directory
-  backups: "~/.local/share/roots/backups"  # Backup directory
+  servers: "/var/lib/roots/servers"   # Server data directory
+  backups: "/var/lib/roots/backups"   # Backup directory
 
 # SFTP server settings
 sftp:
   enabled: true                       # Enable SFTP server (default: true)
   port: 2022                          # SFTP port (default: 2022)
-  host_key: "~/.config/roots/ssh_host_key"  # SSH host key path
+  host_key: "/etc/roots/ssh_host_key" # SSH host key path
 
 # Resource limits for this node
 resources:
@@ -106,10 +106,17 @@ The Docker socket is auto-detected:
 
 #### `storage`
 
-| Option | Type | Required | Default | Description |
-|--------|------|----------|---------|-------------|
-| `servers` | string | No | `~/.local/share/roots/servers` | Directory for server data |
-| `backups` | string | No | `~/.local/share/roots/backups` | Directory for backups |
+| Option | Type | Required | Description |
+|--------|------|----------|-------------|
+| `servers` | string | No | Directory for server data |
+| `backups` | string | No | Directory for backups |
+
+**Default paths by OS:**
+
+| OS | Servers | Backups | SSH Host Key |
+|----|---------|---------|--------------|
+| Linux | `/var/lib/roots/servers` | `/var/lib/roots/backups` | `/etc/roots/ssh_host_key` |
+| macOS | `~/.local/share/roots/servers` | `~/.local/share/roots/backups` | `~/.config/roots/ssh_host_key` |
 
 Paths support `~` expansion for home directory.
 

@@ -6,7 +6,7 @@ package version
 
 // Version is the current version of Roots.
 // This can be overridden at build time using ldflags.
-var Version = "0.1.2"
+var Version = "0.1.3"
 
 // GetVersion returns the current version string.
 func GetVersion() string {

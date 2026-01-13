@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -74,9 +75,9 @@ type HytaleConfig struct {
 }
 
 // DefaultConfig returns a config with sensible defaults
+// Uses FHS-compliant paths on Linux, home directory paths on macOS
 func DefaultConfig() *Config {
-	home, _ := os.UserHomeDir()
-	dataDir := filepath.Join(home, ".local", "share", "roots")
+	serversPath, backupsPath, hostKeyPath := getDefaultPaths()
 
 	return &Config{
 		Panel: PanelConfig{
@@ -92,14 +93,29 @@ func DefaultConfig() *Config {
 			Network: "roots_network",
 		},
 		Storage: StorageConfig{
-			Servers: filepath.Join(dataDir, "servers"),
-			Backups: filepath.Join(dataDir, "backups"),
+			Servers: serversPath,
+			Backups: backupsPath,
 		},
 		SFTP: SFTPConfig{
 			Enabled: true,
 			Port:    2022,
-			HostKey: filepath.Join(home, ".config", "roots", "ssh_host_key"),
+			HostKey: hostKeyPath,
 		},
+	}
+}
+
+// getDefaultPaths returns OS-appropriate default paths
+func getDefaultPaths() (servers, backups, hostKey string) {
+	switch runtime.GOOS {
+	case "linux":
+		// FHS-compliant paths for Linux daemon operation
+		return "/var/lib/roots/servers", "/var/lib/roots/backups", "/etc/roots/ssh_host_key"
+	default:
+		// macOS/other: use home directory
+		home, _ := os.UserHomeDir()
+		dataDir := filepath.Join(home, ".local", "share", "roots")
+		configDir := filepath.Join(home, ".config", "roots")
+		return filepath.Join(dataDir, "servers"), filepath.Join(dataDir, "backups"), filepath.Join(configDir, "ssh_host_key")
 	}
 }
 

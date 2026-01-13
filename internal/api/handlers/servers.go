@@ -1243,6 +1243,16 @@ func (sm *ServerManager) startServer(ctx context.Context, server *Server) error 
 			break // use first port
 		}
 
+		// For Hytale, container port = host port (uses --bind 0.0.0.0:PORT)
+		// For Minecraft, container port is 25565 mapped to host port
+		ports := server.Ports
+		if server.GameType == games.GameHytale {
+			ports = make(map[int]int)
+			for _, hostPort := range server.Ports {
+				ports[hostPort] = hostPort // container port = host port
+			}
+		}
+
 		cfg := &docker.ServerConfig{
 			UUID:               server.UUID,
 			Name:               fmt.Sprintf("roots-%s", server.UUID[:8]),
@@ -1252,7 +1262,7 @@ func (sm *ServerManager) startServer(ctx context.Context, server *Server) error 
 			MemoryLimit:        server.Memory,
 			CPULimit:           server.CPU,
 			ServerDir:          serverDir,
-			Ports:              server.Ports,
+			Ports:              ports,
 			WorkingDir:         "/server",
 			RCONPort:           25575,              // RCON port inside container
 			RCONHostPort:       rconHostPort,       // Mapped to localhost only

@@ -24,6 +24,12 @@ var (
 )
 
 func getDefaultConfigPath() string {
+	// On Linux, prefer /etc/roots/config.yaml if it exists (installed via script)
+	// This matches the FHS-compliant paths used in config.go
+	if _, err := os.Stat("/etc/roots/config.yaml"); err == nil {
+		return "/etc/roots/config.yaml"
+	}
+	// Fall back to user config directory for development/macOS
 	home, _ := os.UserHomeDir()
 	return home + "/.config/roots/config.yaml"
 }

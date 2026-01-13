@@ -291,6 +291,13 @@ func (sm *ServerManager) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Set ownership to UID/GID 1000 (typical container user)
+	// Most game server images (pelican-eggs/yolks, etc.) run as UID 1000
+	if err := os.Chown(serverDir, 1000, 1000); err != nil {
+		sm.logger.Warn("failed to chown server directory", "error", err)
+		// Continue anyway - might work if running as same user
+	}
+
 	// Parse startup command
 	startupCmd := parseCommand(req.StartupCmd)
 
@@ -422,6 +429,12 @@ func (sm *ServerManager) runInstallation(server *Server, install *InstallationCo
 			if !status.Running {
 				if status.ExitCode == 0 {
 					sm.logger.Info("installation completed", "uuid", server.UUID)
+
+					// Fix ownership of all files created during installation
+					// Install containers typically run as root, but server containers run as UID 1000
+					if err := chownRecursive(serverDir, 1000, 1000); err != nil {
+						sm.logger.Warn("failed to chown server directory after install", "error", err)
+					}
 
 					// Game-specific post-installation configuration
 					switch server.GameType {
@@ -936,6 +949,12 @@ func (sm *ServerManager) runReinstallation(server *Server, install *Installation
 			if !status.Running {
 				if status.ExitCode == 0 {
 					sm.logger.Info("reinstallation completed", "uuid", server.UUID)
+
+					// Fix ownership of all files created during reinstallation
+					// Install containers typically run as root, but server containers run as UID 1000
+					if err := chownRecursive(serverDir, 1000, 1000); err != nil {
+						sm.logger.Warn("failed to chown server directory after reinstall", "error", err)
+					}
 
 					// Game-specific post-reinstallation configuration
 					switch server.GameType {
@@ -1812,6 +1831,16 @@ func getVersionFromEnv(env map[string]string) string {
 		}
 	}
 	return ""
+}
+
+// chownRecursive changes ownership of a directory and all its contents
+func chownRecursive(path string, uid, gid int) error {
+	return filepath.WalkDir(path, func(name string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chown(name, uid, gid)
+	})
 }
 
 // parseCommand splits a command string into args, handling quotes

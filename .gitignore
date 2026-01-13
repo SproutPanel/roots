@@ -1,5 +1,5 @@
 # Build artifacts
-roots
+/roots
 roots_linux_amd64/
 roots_linux_arm64/
 roots_darwin_amd64/

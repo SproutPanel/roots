@@ -1201,24 +1201,31 @@ func (sm *ServerManager) startServer(ctx context.Context, server *Server) error 
 
 	// Hytale auto-update on start
 	if server.GameType == games.GameHytale {
-		autoUpdate := server.Env["HYTALE_AUTO_UPDATE"]
-		if autoUpdate == "" || autoUpdate == "true" || autoUpdate == "1" {
-			sm.logger.Info("checking for Hytale updates before start", "uuid", server.UUID)
+		serverJar := filepath.Join(serverDir, "HytaleServer.jar")
+
+		// Check if server files exist first
+		if _, statErr := os.Stat(serverJar); os.IsNotExist(statErr) {
+			// No server files - need to download (blocking)
+			sm.logger.Info("Hytale server files not found, downloading", "uuid", server.UUID)
 			if err := sm.checkAndApplyHytaleUpdate(ctx, server, serverDir); err != nil {
-				sm.logger.Warn("Hytale update check failed",
-					"uuid", server.UUID,
-					"error", err,
-				)
-				// Check if HytaleServer.jar exists - if not, we can't start
-				serverJar := filepath.Join(serverDir, "HytaleServer.jar")
-				if _, statErr := os.Stat(serverJar); os.IsNotExist(statErr) {
-					server.Status = "install_failed"
-					sm.saveServer(server)
-					sm.reportStatusToPanel(server.UUID, "install_failed", "Hytale server files not found. Download may have failed.")
-					return fmt.Errorf("Hytale server files not found - download failed: %w", err)
-				}
-				// Server files exist, continue with existing version
+				server.Status = "install_failed"
+				sm.saveServer(server)
+				sm.reportStatusToPanel(server.UUID, "install_failed", "Hytale server files not found. Download may have failed.")
+				return fmt.Errorf("Hytale server files not found - download failed: %w", err)
+			}
+		} else {
+			// Server files exist - check for updates in background (non-blocking)
+			autoUpdate := server.Env["HYTALE_AUTO_UPDATE"]
+			if autoUpdate == "" || autoUpdate == "true" || autoUpdate == "1" {
 				sm.logger.Info("Hytale server files exist, continuing with current version", "uuid", server.UUID)
+				// Run update check in background for next time
+				go func() {
+					bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+					defer cancel()
+					if err := sm.checkAndApplyHytaleUpdate(bgCtx, server, serverDir); err != nil {
+						sm.logger.Warn("background Hytale update check failed", "uuid", server.UUID, "error", err)
+					}
+				}()
 			}
 		}
 	}

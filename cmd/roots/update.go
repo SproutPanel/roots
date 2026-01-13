@@ -19,11 +19,27 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
-	"github.com/sproutpanel/roots/internal/config"
 	"github.com/sproutpanel/roots/internal/version"
 )
 
-// ReleaseInfo represents version information from the panel
+const githubRepo = "SproutPanel/roots"
+
+// GitHubRelease represents a release from GitHub's API
+type GitHubRelease struct {
+	TagName     string        `json:"tag_name"`
+	Name        string        `json:"name"`
+	Body        string        `json:"body"`
+	PublishedAt string        `json:"published_at"`
+	Assets      []GitHubAsset `json:"assets"`
+}
+
+// GitHubAsset represents a downloadable asset from a GitHub release
+type GitHubAsset struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+}
+
+// ReleaseInfo represents parsed version information
 type ReleaseInfo struct {
 	Version     string            `json:"version"`
 	ReleaseDate string            `json:"release_date"`
@@ -74,15 +90,9 @@ func runUpdate(checkOnly, force bool, channel string) error {
 	fmt.Println(dimStyle.Render("Current version: " + version.Version))
 	fmt.Println()
 
-	// Load config to get panel URL
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-
-	// Check for updates
+	// Check for updates from GitHub
 	fmt.Println("Checking for updates...")
-	release, err := checkForUpdates(cfg.Panel.URL, channel)
+	release, err := checkForUpdates(channel)
 	if err != nil {
 		return fmt.Errorf("failed to check for updates: %w", err)
 	}
@@ -190,29 +200,61 @@ func runUpdate(checkOnly, force bool, channel string) error {
 	return nil
 }
 
-func checkForUpdates(panelURL, channel string) (*ReleaseInfo, error) {
-	url := fmt.Sprintf("%s/api/releases/latest", strings.TrimSuffix(panelURL, "/"))
-	if channel != "stable" {
-		url = fmt.Sprintf("%s?channel=%s", url, channel)
-	}
+func checkForUpdates(channel string) (*ReleaseInfo, error) {
+	// Fetch latest release from GitHub
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo)
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to panel: %w", err)
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("User-Agent", "roots-daemon")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to GitHub: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("panel returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("GitHub returned status %d", resp.StatusCode)
 	}
 
-	var release ReleaseInfo
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+	var ghRelease GitHubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&ghRelease); err != nil {
 		return nil, fmt.Errorf("failed to parse release info: %w", err)
 	}
 
-	return &release, nil
+	// Convert GitHub release to our ReleaseInfo format
+	release := &ReleaseInfo{
+		Version:     strings.TrimPrefix(ghRelease.TagName, "v"),
+		ReleaseDate: ghRelease.PublishedAt,
+		Changelog:   ghRelease.Body,
+		Downloads:   make(map[string]string),
+		Checksums:   make(map[string]string),
+	}
+
+	// Map assets to platform-specific download URLs
+	// Expected asset names: roots_linux_amd64.tar.gz, roots_linux_arm64.tar.gz, roots_darwin_amd64.tar.gz, etc.
+	for _, asset := range ghRelease.Assets {
+		name := asset.Name
+		// Parse platform from filename like "roots_linux_amd64.tar.gz"
+		if strings.HasPrefix(name, "roots_") && strings.HasSuffix(name, ".tar.gz") {
+			// Extract os_arch from "roots_linux_amd64.tar.gz"
+			parts := strings.TrimSuffix(strings.TrimPrefix(name, "roots_"), ".tar.gz")
+			// Convert "linux_amd64" to "linux-amd64"
+			platform := strings.Replace(parts, "_", "-", 1)
+			release.Downloads[platform] = asset.BrowserDownloadURL
+		}
+		// Check for checksum files
+		if strings.HasSuffix(name, ".sha256") {
+			// Could fetch and parse checksum files here if needed
+		}
+	}
+
+	return release, nil
 }
 
 func downloadUpdate(url string) (string, error) {

@@ -394,6 +394,13 @@ func (c *Client) ImageExists(ctx context.Context, imageName string) bool {
 // It runs a temporary container to determine the actual UID.
 // Returns 1000 as a fallback if unable to determine.
 func (c *Client) GetImageUID(ctx context.Context, imageName string) (int, int) {
+	// Pull image if it doesn't exist
+	if !c.ImageExists(ctx, imageName) {
+		if err := c.PullImage(ctx, imageName); err != nil {
+			return 1000, 1000 // fallback if can't pull
+		}
+	}
+
 	// Create a temporary container to check the UID
 	resp, err := c.docker.ContainerCreate(ctx,
 		&container.Config{

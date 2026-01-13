@@ -108,6 +108,18 @@ func (d *DownloaderClient) runDownloader(ctx context.Context, serverDir string, 
 		return nil, fmt.Errorf("failed to create server directory: %w", err)
 	}
 
+	// Pull the image if it doesn't exist
+	_, _, err := d.dockerClient.ImageInspectWithRaw(ctx, d.image)
+	if err != nil {
+		d.logger.Info("pulling downloader image", "image", d.image)
+		reader, pullErr := d.dockerClient.ImagePull(ctx, d.image, types.ImagePullOptions{})
+		if pullErr != nil {
+			return nil, fmt.Errorf("failed to pull image %s: %w", d.image, pullErr)
+		}
+		io.Copy(io.Discard, reader)
+		reader.Close()
+	}
+
 	// Build the command to run inside the container
 	// 1. Download hytale-downloader if not present
 	// 2. Make it executable

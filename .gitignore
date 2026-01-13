@@ -1,0 +1,35 @@
+# Build artifacts
+roots
+roots_linux_amd64/
+roots_linux_arm64/
+roots_darwin_amd64/
+roots_darwin_arm64/
+roots_*.tar.gz
+checksums.txt
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config (may contain secrets)
+config.yml
+*.pem
+*.key

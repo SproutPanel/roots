@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.1.2)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Update version.go
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          VERSION_FILE="internal/version/version.go"
+
+          echo "Updating ${VERSION_FILE} to version ${VERSION}..."
+          sed -i "s/var Version = \".*\"/var Version = \"${VERSION}\"/" "${VERSION_FILE}"
+
+          echo "Updated version.go:"
+          cat "${VERSION_FILE}"
+
+      - name: Commit and tag
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add internal/version/version.go
+          git commit -m "Bump version to ${VERSION}"
+          git tag -a "v${VERSION}" -m "Release v${VERSION}"
+
+          git push origin main
+          git push origin "v${VERSION}"
+
+      - name: Build and package
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          make release VERSION="${VERSION}"
+
+      - name: Generate checksums
+        run: |
+          sha256sum roots_*.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+
+          gh release create "v${VERSION}" \
+            --title "Roots v${VERSION}" \
+            --generate-notes \
+            roots_*.tar.gz \
+            checksums.txt
+
+      - name: Output release info
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** v${VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Assets:**" >> $GITHUB_STEP_SUMMARY
+          echo "- roots_linux_amd64.tar.gz" >> $GITHUB_STEP_SUMMARY
+          echo "- roots_linux_arm64.tar.gz" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Download URLs:**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/roots_linux_amd64.tar.gz" >> $GITHUB_STEP_SUMMARY
+          echo "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/roots_linux_arm64.tar.gz" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

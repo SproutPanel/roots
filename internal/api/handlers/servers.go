@@ -291,9 +291,10 @@ func (sm *ServerManager) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set ownership to UID/GID 1000 (typical container user)
-	// Most game server images (pelican-eggs/yolks, etc.) run as UID 1000
-	if err := os.Chown(serverDir, 1000, 1000); err != nil {
+	// Set ownership to the UID that the server image runs as
+	uid, gid := sm.docker.GetImageUID(r.Context(), req.Image)
+	sm.logger.Info("detected container UID", "image", req.Image, "uid", uid, "gid", gid)
+	if err := os.Chown(serverDir, uid, gid); err != nil {
 		sm.logger.Warn("failed to chown server directory", "error", err)
 		// Continue anyway - might work if running as same user
 	}
@@ -462,9 +463,11 @@ func (sm *ServerManager) runInstallation(server *Server, install *InstallationCo
 					}
 
 					// Fix ownership of all files created during installation
-					// Install containers typically run as root, but server containers run as UID 1000
+					// Install containers run as root, but server containers run as their configured user
 					// This must run AFTER post-installation configuration to catch all files
-					if err := chownRecursive(serverDir, 1000, 1000); err != nil {
+					uid, gid := sm.docker.GetImageUID(ctx, server.Image)
+					sm.logger.Info("chowning server directory", "uuid", server.UUID, "uid", uid, "gid", gid)
+					if err := chownRecursive(serverDir, uid, gid); err != nil {
 						sm.logger.Warn("failed to chown server directory after install", "error", err)
 					}
 
@@ -980,9 +983,11 @@ func (sm *ServerManager) runReinstallation(server *Server, install *Installation
 					}
 
 					// Fix ownership of all files created during reinstallation
-					// Install containers typically run as root, but server containers run as UID 1000
+					// Install containers run as root, but server containers run as their configured user
 					// This must run AFTER post-reinstallation configuration to catch all files
-					if err := chownRecursive(serverDir, 1000, 1000); err != nil {
+					uid, gid := sm.docker.GetImageUID(ctx, server.Image)
+					sm.logger.Info("chowning server directory", "uuid", server.UUID, "uid", uid, "gid", gid)
+					if err := chownRecursive(serverDir, uid, gid); err != nil {
 						sm.logger.Warn("failed to chown server directory after reinstall", "error", err)
 					}
 

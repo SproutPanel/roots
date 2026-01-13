@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -386,6 +388,56 @@ func (c *Client) PullImage(ctx context.Context, imageName string) error {
 func (c *Client) ImageExists(ctx context.Context, imageName string) bool {
 	_, _, err := c.docker.ImageInspectWithRaw(ctx, imageName)
 	return err == nil
+}
+
+// GetImageUID returns the UID that a container will run as for the given image.
+// It runs a temporary container to determine the actual UID.
+// Returns 1000 as a fallback if unable to determine.
+func (c *Client) GetImageUID(ctx context.Context, imageName string) (int, int) {
+	// Create a temporary container to check the UID
+	resp, err := c.docker.ContainerCreate(ctx,
+		&container.Config{
+			Image: imageName,
+			Cmd:   []string{"id", "-u"},
+		},
+		nil, nil, nil, "")
+	if err != nil {
+		return 1000, 1000 // fallback
+	}
+	defer c.docker.ContainerRemove(ctx, resp.ID, types.ContainerRemoveOptions{Force: true})
+
+	// Start and wait for the container
+	if err := c.docker.ContainerStart(ctx, resp.ID, types.ContainerStartOptions{}); err != nil {
+		return 1000, 1000
+	}
+
+	statusCh, errCh := c.docker.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
+	select {
+	case <-statusCh:
+	case <-errCh:
+		return 1000, 1000
+	}
+
+	// Read the output
+	out, err := c.docker.ContainerLogs(ctx, resp.ID, types.ContainerLogsOptions{ShowStdout: true})
+	if err != nil {
+		return 1000, 1000
+	}
+	defer out.Close()
+
+	// Parse the UID from output (skip docker log header)
+	buf := make([]byte, 64)
+	n, _ := out.Read(buf)
+	if n > 8 {
+		// Docker log format has 8-byte header
+		uidStr := string(buf[8:n])
+		uidStr = strings.TrimSpace(uidStr)
+		if uid, err := strconv.Atoi(uidStr); err == nil {
+			return uid, uid // Use same for GID (typical for container images)
+		}
+	}
+
+	return 1000, 1000 // fallback
 }
 
 // FindContainerByUUID finds a container by its server UUID label

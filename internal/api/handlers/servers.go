@@ -430,12 +430,6 @@ func (sm *ServerManager) runInstallation(server *Server, install *InstallationCo
 				if status.ExitCode == 0 {
 					sm.logger.Info("installation completed", "uuid", server.UUID)
 
-					// Fix ownership of all files created during installation
-					// Install containers typically run as root, but server containers run as UID 1000
-					if err := chownRecursive(serverDir, 1000, 1000); err != nil {
-						sm.logger.Warn("failed to chown server directory after install", "error", err)
-					}
-
 					// Game-specific post-installation configuration
 					switch server.GameType {
 					case games.GameMinecraft:
@@ -465,6 +459,13 @@ func (sm *ServerManager) runInstallation(server *Server, install *InstallationCo
 						// The hytale-downloader handles server file downloads
 						// Server auth happens at runtime via /auth login device
 						sm.logger.Info("Hytale server installation completed", "uuid", server.UUID)
+					}
+
+					// Fix ownership of all files created during installation
+					// Install containers typically run as root, but server containers run as UID 1000
+					// This must run AFTER post-installation configuration to catch all files
+					if err := chownRecursive(serverDir, 1000, 1000); err != nil {
+						sm.logger.Warn("failed to chown server directory after install", "error", err)
 					}
 
 					server.Status = "offline"
@@ -950,12 +951,6 @@ func (sm *ServerManager) runReinstallation(server *Server, install *Installation
 				if status.ExitCode == 0 {
 					sm.logger.Info("reinstallation completed", "uuid", server.UUID)
 
-					// Fix ownership of all files created during reinstallation
-					// Install containers typically run as root, but server containers run as UID 1000
-					if err := chownRecursive(serverDir, 1000, 1000); err != nil {
-						sm.logger.Warn("failed to chown server directory after reinstall", "error", err)
-					}
-
 					// Game-specific post-reinstallation configuration
 					switch server.GameType {
 					case games.GameMinecraft:
@@ -982,6 +977,13 @@ func (sm *ServerManager) runReinstallation(server *Server, install *Installation
 					case games.GameHytale:
 						// Hytale reinstallation: nothing special needed
 						sm.logger.Info("Hytale server reinstallation completed", "uuid", server.UUID)
+					}
+
+					// Fix ownership of all files created during reinstallation
+					// Install containers typically run as root, but server containers run as UID 1000
+					// This must run AFTER post-reinstallation configuration to catch all files
+					if err := chownRecursive(serverDir, 1000, 1000); err != nil {
+						sm.logger.Warn("failed to chown server directory after reinstall", "error", err)
 					}
 
 					server.Status = "offline"

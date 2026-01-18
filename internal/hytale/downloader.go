@@ -89,16 +89,21 @@ func (d *DownloaderClient) CheckVersion(ctx context.Context, serverDir string, c
 
 // CheckUpdate checks if there's a newer version available
 func (d *DownloaderClient) CheckUpdate(ctx context.Context, serverDir string, callback OutputCallback) (bool, string, error) {
-	// First get current version
-	currentVersion, err := d.CheckVersion(ctx, serverDir, callback)
+	// Get the installed version from our marker file
+	installedVersion, err := d.GetInstalledVersion(serverDir)
 	if err != nil {
-		return false, "", err
+		return false, "", fmt.Errorf("failed to get installed version: %w", err)
 	}
 
-	// Then check latest available (this might require a different approach
-	// depending on how hytale-downloader works)
-	// For now, just return the current version
-	return false, currentVersion, nil
+	// Get the latest available version using -print-version
+	latestVersion, err := d.CheckVersion(ctx, serverDir, callback)
+	if err != nil {
+		return false, installedVersion, fmt.Errorf("failed to check latest version: %w", err)
+	}
+
+	// Compare versions - update available if they differ
+	updateAvailable := installedVersion != latestVersion && latestVersion != ""
+	return updateAvailable, latestVersion, nil
 }
 
 // runDownloader executes the hytale-downloader in a Docker container
@@ -149,27 +154,31 @@ echo "Running hytale-downloader..."
 
 # Extract the downloaded server zip if present
 # The downloader creates files like "2026.01.13-dcad8778f.zip"
-# Find and sort server zips by date (newest first)
-server_zips=$(ls -t [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-*.zip 2>/dev/null || true)
+# Find server zips sorted by filename (which includes date, so newest is last alphabetically)
+newest_zip=""
+for f in [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-*.zip; do
+    [ -f "$f" ] && newest_zip="$f"
+done
+
+if [ -n "$newest_zip" ]; then
+    echo "Extracting server files from $newest_zip..."
+    unzip -o "$newest_zip"
+    echo "Server files extracted successfully"
+    # Save the version from the zip filename
+    version="${newest_zip%%.zip}"
+    echo "$version" > .hytale_version
+    echo "Saved version: $version"
+fi
+
+# Clean up old zips, keep only the 2 most recent
+# List zips in reverse order (newest first by filename)
 zip_count=0
-
-for zipfile in $server_zips; do
+for f in $(ls -r [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-*.zip 2>/dev/null); do
+    [ -f "$f" ] || continue
     zip_count=$((zip_count + 1))
-
-    # Extract only the newest zip
-    if [ $zip_count -eq 1 ]; then
-        echo "Extracting server files from $zipfile..."
-        unzip -o "$zipfile"
-        echo "Server files extracted successfully"
-        # Save the version from the zip filename
-        version=$(basename "$zipfile" .zip)
-        echo "$version" > .hytale_version
-    fi
-
-    # Keep only the 2 most recent zips (current + previous for rollback)
     if [ $zip_count -gt 2 ]; then
-        echo "Removing old server zip: $zipfile"
-        rm -f "$zipfile"
+        echo "Removing old server zip: $f"
+        rm -f "$f"
     fi
 done
 `, DownloaderBinary, DownloaderURL, DownloaderBinary, DownloaderBinary, strings.Join(args, " "), d.buildPatchlineArg(patchline))

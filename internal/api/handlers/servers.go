@@ -15,6 +15,7 @@ import (
 	"time"
 
 	dockerclient "github.com/docker/docker/client"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"github.com/sproutpanel/roots/internal/config"
@@ -1268,6 +1269,21 @@ func (sm *ServerManager) startServer(ctx context.Context, server *Server) error 
 			RCONHostPort:       rconHostPort,       // Mapped to localhost only
 			ManagementPort:     25576,              // Management Protocol port inside container (1.21.9+)
 			ManagementHostPort: managementHostPort, // Mapped to localhost only
+		}
+
+		// For Hytale, mount /etc/machine-id to provide a stable hardware UUID
+		// This allows credential encryption to persist across container restarts
+		if server.GameType == games.GameHytale {
+			if _, err := os.Stat("/etc/machine-id"); err == nil {
+				cfg.ExtraMounts = []mount.Mount{
+					{
+						Type:     mount.TypeBind,
+						Source:   "/etc/machine-id",
+						Target:   "/etc/machine-id",
+						ReadOnly: true,
+					},
+				}
+			}
 		}
 
 		containerID, err := sm.docker.CreateContainer(ctx, cfg)

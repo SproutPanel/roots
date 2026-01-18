@@ -146,6 +146,32 @@ fi
 # Run the downloader
 echo "Running hytale-downloader..."
 ./%s %s %s
+
+# Extract the downloaded server zip if present
+# The downloader creates files like "2026.01.13-dcad8778f.zip"
+# Find and sort server zips by date (newest first)
+server_zips=$(ls -t [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-*.zip 2>/dev/null || true)
+zip_count=0
+
+for zipfile in $server_zips; do
+    zip_count=$((zip_count + 1))
+
+    # Extract only the newest zip
+    if [ $zip_count -eq 1 ]; then
+        echo "Extracting server files from $zipfile..."
+        unzip -o "$zipfile"
+        echo "Server files extracted successfully"
+        # Save the version from the zip filename
+        version=$(basename "$zipfile" .zip)
+        echo "$version" > .hytale_version
+    fi
+
+    # Keep only the 2 most recent zips (current + previous for rollback)
+    if [ $zip_count -gt 2 ]; then
+        echo "Removing old server zip: $zipfile"
+        rm -f "$zipfile"
+    fi
+done
 `, DownloaderBinary, DownloaderURL, DownloaderBinary, DownloaderBinary, strings.Join(args, " "), d.buildPatchlineArg(patchline))
 
 	// Create container config

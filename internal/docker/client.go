@@ -101,6 +101,7 @@ type ServerConfig struct {
 	RCONHostPort       int // RCON port on host (for localhost binding)
 	ManagementPort     int // Management Protocol port inside container (1.21.9+)
 	ManagementHostPort int // Management Protocol port on host (for localhost binding)
+	ExtraMounts        []mount.Mount // Additional mounts (e.g., /etc/machine-id for Hytale)
 }
 
 // CreateContainer creates a new container for a game server
@@ -179,16 +180,21 @@ func (c *Client) CreateContainer(ctx context.Context, cfg *ServerConfig) (string
 		mountTarget = "/server"
 	}
 
+	// Build mounts list
+	mounts := []mount.Mount{
+		{
+			Type:   mount.TypeBind,
+			Source: cfg.ServerDir,
+			Target: mountTarget,
+		},
+	}
+	// Add extra mounts (e.g., /etc/machine-id for Hytale)
+	mounts = append(mounts, cfg.ExtraMounts...)
+
 	// Host config
 	hostConfig := &container.HostConfig{
 		PortBindings: portBindings,
-		Mounts: []mount.Mount{
-			{
-				Type:   mount.TypeBind,
-				Source: cfg.ServerDir,
-				Target: mountTarget,
-			},
-		},
+		Mounts:       mounts,
 		Resources: container.Resources{
 			Memory:   cfg.MemoryLimit,
 			NanoCPUs: cfg.CPULimit * 1000000, // Convert millicores to nanocores

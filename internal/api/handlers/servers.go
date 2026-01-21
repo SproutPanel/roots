@@ -23,6 +23,7 @@ import (
 	"github.com/sproutpanel/roots/internal/games"
 	gameshytale "github.com/sproutpanel/roots/internal/games/hytale"
 	"github.com/sproutpanel/roots/internal/games/minecraft"
+	hthandlers "github.com/sproutpanel/roots/internal/games/hytale/handlers"
 	mchandlers "github.com/sproutpanel/roots/internal/games/minecraft/handlers"
 	"github.com/sproutpanel/roots/internal/hytale"
 )
@@ -2013,6 +2014,49 @@ func (sm *ServerManager) ResolvePath(serverDir, relativePath string) (string, er
 // GetMinecraftHandlers returns the Minecraft handlers instance
 func (sm *ServerManager) GetMinecraftHandlers() *mchandlers.MinecraftHandlers {
 	return mchandlers.NewMinecraftHandlers(sm, sm.logger)
+}
+
+// ============================================================================
+// HytaleHandlers ServerProvider interface implementation
+// ============================================================================
+
+// hytaleServerProvider adapts ServerManager for Hytale handlers
+type hytaleServerProvider struct {
+	sm *ServerManager
+}
+
+// GetServer returns server info by UUID (implements hthandlers.ServerProvider)
+func (p *hytaleServerProvider) GetServer(uuid string) (hthandlers.ServerInfo, bool) {
+	p.sm.mu.RLock()
+	server, ok := p.sm.servers[uuid]
+	p.sm.mu.RUnlock()
+
+	if !ok {
+		return hthandlers.ServerInfo{}, false
+	}
+
+	return hthandlers.ServerInfo{
+		UUID:     server.UUID,
+		Name:     server.Name,
+		GameType: server.GameType,
+		Status:   server.Status,
+	}, true
+}
+
+// GetServerDir returns the directory path for a server
+func (p *hytaleServerProvider) GetServerDir(uuid string) string {
+	return filepath.Join(p.sm.config.Storage.Servers, uuid)
+}
+
+// ResolvePath resolves and validates a relative path
+func (p *hytaleServerProvider) ResolvePath(serverDir, relativePath string) (string, error) {
+	return p.sm.resolvePath(serverDir, relativePath)
+}
+
+// GetHytaleHandlers returns the Hytale handlers instance
+func (sm *ServerManager) GetHytaleHandlers() *hthandlers.HytaleHandlers {
+	provider := &hytaleServerProvider{sm: sm}
+	return hthandlers.NewHytaleHandlers(provider, sm.logger)
 }
 
 // ============================================================================

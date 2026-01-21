@@ -31,6 +31,7 @@ func HytaleConfig() *games.GameConfig {
 		ConfigFile: "config.json",
 		Features: []games.Feature{
 			games.FeaturePlayers, // Basic player management via console
+			games.FeatureMods,    // Mod support via /mods directory
 		},
 	}
 }

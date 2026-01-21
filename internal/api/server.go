@@ -145,6 +145,10 @@ func (s *Server) setupRouter() {
 					r.Get("/version", s.serverMgr.GetHytaleVersion)
 					r.Post("/update/check", s.serverMgr.CheckHytaleUpdate)
 					r.Post("/update/apply", s.serverMgr.ApplyHytaleUpdate)
+
+					// Hytale mod handlers
+					hytaleHandlers := s.serverMgr.GetHytaleHandlers()
+					hytaleHandlers.RegisterRoutes(r)
 				})
 			})
 		})

@@ -307,6 +307,15 @@ func (c *Client) GetContainerIP(ctx context.Context, containerID string) (string
 	return "", fmt.Errorf("no IP address found for container %s", containerID)
 }
 
+// GetContainerCmd returns the command (Cmd) configured for a container
+func (c *Client) GetContainerCmd(ctx context.Context, containerID string) ([]string, error) {
+	info, err := c.docker.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return nil, err
+	}
+	return info.Config.Cmd, nil
+}
+
 // ContainerStats represents resource usage stats
 type ContainerStats struct {
 	CPUPercent    float64

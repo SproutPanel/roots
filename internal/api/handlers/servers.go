@@ -1264,6 +1264,28 @@ func (sm *ServerManager) startServer(ctx context.Context, server *Server) error 
 		}
 	}
 
+	// Check if existing container needs to be recreated (startup_cmd changed)
+	if server.ContainerID != "" {
+		containerCmd, err := sm.docker.GetContainerCmd(ctx, server.ContainerID)
+		if err != nil {
+			// Container doesn't exist or error - clear the ID so it gets recreated
+			sm.logger.Warn("failed to inspect container, will recreate", "uuid", server.UUID, "error", err)
+			server.ContainerID = ""
+		} else if !slicesEqual(containerCmd, server.StartupCmd) {
+			// Startup command changed - need to recreate container
+			sm.logger.Info("startup command changed, recreating container",
+				"uuid", server.UUID,
+				"old_cmd", containerCmd,
+				"new_cmd", server.StartupCmd,
+			)
+			if err := sm.docker.RemoveContainer(ctx, server.ContainerID, true); err != nil {
+				sm.logger.Warn("failed to remove old container", "uuid", server.UUID, "error", err)
+			}
+			server.ContainerID = ""
+			sm.saveServer(server)
+		}
+	}
+
 	// Create container if doesn't exist
 	if server.ContainerID == "" {
 		// Determine host ports for management protocols
@@ -1958,6 +1980,18 @@ func portsEqual(a, b map[int]int) bool {
 	}
 	for k, v := range a {
 		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, v := range a {
+		if b[i] != v {
 			return false
 		}
 	}

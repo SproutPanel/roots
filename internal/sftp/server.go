@@ -21,6 +21,12 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// sftpMaxTxPacket is the maximum payload size (bytes) the server will return
+// per read request. The library default is 32KB (1<<15); 256KB matches what
+// OpenSSH and most GUI clients request and dramatically reduces round-trips on
+// high-latency links.
+const sftpMaxTxPacket = 256 * 1024
+
 // Server represents an SFTP server
 type Server struct {
 	config   *config.Config
@@ -191,7 +197,17 @@ func (s *Server) handleChannel(channel ssh.Channel, requests <-chan *ssh.Request
 			FilePut:  handler,
 			FileCmd:  handler,
 			FileList: handler,
-		})
+		},
+			// Raise the max read payload from the 32KB default. The client
+			// decides the actual chunk size, so this only lets modern clients
+			// (FileZilla, WinSCP, recent OpenSSH) fetch large chunks in one
+			// round-trip instead of being chopped into 32KB short-reads, which
+			// caps throughput badly on any link with latency.
+			sftp.WithRSMaxTxPacket(sftpMaxTxPacket),
+			// Reuse packet buffers across requests to reduce GC churn during
+			// sustained transfers.
+			sftp.WithRSAllocator(),
+		)
 
 		s.logger.Info("SFTP session started",
 			"user", username,

@@ -623,6 +623,7 @@ type UpdateRequest struct {
 	PublicID   string            `json:"public_id,omitempty"`
 	Slug       string            `json:"slug,omitempty"`
 	Name       string            `json:"name,omitempty"`
+	Image      string            `json:"image,omitempty"`
 	Memory     int64             `json:"memory,omitempty"`     // MB
 	CPU        int               `json:"cpu,omitempty"`        // percent (100 = 1 core)
 	Disk       int64             `json:"disk,omitempty"`       // MB
@@ -663,6 +664,9 @@ func (sm *ServerManager) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Name != "" {
 		server.Name = req.Name
+	}
+	if req.Image != "" {
+		server.Image = req.Image
 	}
 	if req.Memory > 0 {
 		newMemory := req.Memory * 1024 * 1024 // Convert MB to bytes
@@ -1264,12 +1268,13 @@ func (sm *ServerManager) startServer(ctx context.Context, server *Server) error 
 		}
 	}
 
-	// Check if existing container needs to be recreated (startup_cmd changed)
+	// Check if existing container needs to be recreated (startup_cmd or image changed)
 	if server.ContainerID != "" {
-		containerCmd, err := sm.docker.GetContainerCmd(ctx, server.ContainerID)
-		if err != nil {
+		containerCmd, cmdErr := sm.docker.GetContainerCmd(ctx, server.ContainerID)
+		containerImage, imgErr := sm.docker.GetContainerImage(ctx, server.ContainerID)
+		if cmdErr != nil || imgErr != nil {
 			// Container doesn't exist or error - clear the ID so it gets recreated
-			sm.logger.Warn("failed to inspect container, will recreate", "uuid", server.UUID, "error", err)
+			sm.logger.Warn("failed to inspect container, will recreate", "uuid", server.UUID, "cmd_error", cmdErr, "image_error", imgErr)
 			server.ContainerID = ""
 		} else if !slicesEqual(containerCmd, server.StartupCmd) {
 			// Startup command changed - need to recreate container
@@ -1277,6 +1282,18 @@ func (sm *ServerManager) startServer(ctx context.Context, server *Server) error 
 				"uuid", server.UUID,
 				"old_cmd", containerCmd,
 				"new_cmd", server.StartupCmd,
+			)
+			if err := sm.docker.RemoveContainer(ctx, server.ContainerID, true); err != nil {
+				sm.logger.Warn("failed to remove old container", "uuid", server.UUID, "error", err)
+			}
+			server.ContainerID = ""
+			sm.saveServer(server)
+		} else if containerImage != server.Image {
+			// Docker image changed - need to recreate container
+			sm.logger.Info("docker image changed, recreating container",
+				"uuid", server.UUID,
+				"old_image", containerImage,
+				"new_image", server.Image,
 			)
 			if err := sm.docker.RemoveContainer(ctx, server.ContainerID, true); err != nil {
 				sm.logger.Warn("failed to remove old container", "uuid", server.UUID, "error", err)

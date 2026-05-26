@@ -316,6 +316,15 @@ func (c *Client) GetContainerCmd(ctx context.Context, containerID string) ([]str
 	return info.Config.Cmd, nil
 }
 
+// GetContainerImage returns the image the container was created from.
+func (c *Client) GetContainerImage(ctx context.Context, containerID string) (string, error) {
+	info, err := c.docker.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return "", err
+	}
+	return info.Config.Image, nil
+}
+
 // ContainerStats represents resource usage stats
 type ContainerStats struct {
 	CPUPercent    float64

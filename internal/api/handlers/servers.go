@@ -749,9 +749,14 @@ type PowerRequest struct {
 	Action string `json:"action"` // start, stop, restart, kill
 }
 
-// ReinstallRequest is the request body for reinstalling a server
+// ReinstallRequest is the request body for reinstalling a server.
+// Env/StartupCmd are optional: when present they refresh the stored values so
+// the reinstall picks up changes (e.g. a new NEOFORGE_VERSION) even if no prior
+// update call synced them.
 type ReinstallRequest struct {
 	Installation *InstallationConfig `json:"installation"`
+	Env          map[string]string   `json:"env,omitempty"`
+	StartupCmd   string              `json:"startup_cmd,omitempty"`
 }
 
 // Power handles POST /api/servers/{uuid}/power
@@ -838,6 +843,15 @@ func (sm *ServerManager) Reinstall(w http.ResponseWriter, r *http.Request) {
 		sm.mu.Unlock()
 		http.Error(w, "Server must be offline, crashed, or failed to reinstall", http.StatusBadRequest)
 		return
+	}
+
+	// Refresh env/startup so the reinstall reflects panel-side changes even if
+	// no prior update call synced them. runReinstallation reads server.Env.
+	if req.Env != nil {
+		server.Env = req.Env
+	}
+	if req.StartupCmd != "" {
+		server.StartupCmd = parseCommand(req.StartupCmd)
 	}
 
 	// Update status to installing

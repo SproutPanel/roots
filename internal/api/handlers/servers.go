@@ -60,6 +60,7 @@ type Server struct {
 	Ports       map[int]int       `json:"ports"`       // container -> host
 	StartupCmd  []string          `json:"startup_cmd"`
 	Version     string            `json:"version,omitempty"` // Game version (e.g., "1.21.9", "latest")
+	Modpack     *ModpackConfig    `json:"modpack,omitempty"` // provisioned after the install script (see modpacks.go)
 	CreatedAt   time.Time         `json:"created_at"`
 }
 
@@ -244,6 +245,7 @@ type CreateRequest struct {
 	Ports       map[int]int       `json:"ports"`
 	Version     string            `json:"version,omitempty"` // Game version (e.g., "1.21.9", "latest")
 	Installation *InstallationConfig `json:"installation,omitempty"`
+	Modpack      *ModpackConfig      `json:"modpack,omitempty"`
 }
 
 // InstallationConfig defines how to install a server
@@ -320,6 +322,7 @@ func (sm *ServerManager) Create(w http.ResponseWriter, r *http.Request) {
 		Ports:      req.Ports,
 		StartupCmd: startupCmd,
 		Version:    req.Version,
+		Modpack:    req.Modpack,
 		CreatedAt:  time.Now(),
 	}
 
@@ -462,6 +465,17 @@ func (sm *ServerManager) runInstallation(server *Server, install *InstallationCo
 						// The hytale-downloader handles server file downloads
 						// Server auth happens at runtime via /auth login device
 						sm.logger.Info("Hytale server installation completed", "uuid", server.UUID)
+					}
+
+					// Modpack provisioning runs after the loader script so the
+					// pack's mods/configs land on a working base install, and
+					// before the chown below so they get correct ownership.
+					if server.Modpack != nil {
+						if err := sm.provisionModpack(server, serverDir); err != nil {
+							sm.logger.Error("modpack provisioning failed", "uuid", server.UUID, "error", err)
+							setFailed(fmt.Sprintf("Modpack provisioning failed: %v", err))
+							return
+						}
 					}
 
 					// Fix ownership of all files created during installation
@@ -757,6 +771,9 @@ type ReinstallRequest struct {
 	Installation *InstallationConfig `json:"installation"`
 	Env          map[string]string   `json:"env,omitempty"`
 	StartupCmd   string              `json:"startup_cmd,omitempty"`
+	// Modpack, when present, replaces the stored modpack config. The panel
+	// re-resolves it on every reinstall because source download URLs expire.
+	Modpack *ModpackConfig `json:"modpack,omitempty"`
 }
 
 // Power handles POST /api/servers/{uuid}/power
@@ -852,6 +869,9 @@ func (sm *ServerManager) Reinstall(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.StartupCmd != "" {
 		server.StartupCmd = parseCommand(req.StartupCmd)
+	}
+	if req.Modpack != nil {
+		server.Modpack = req.Modpack
 	}
 
 	// Update status to installing
@@ -1000,6 +1020,17 @@ func (sm *ServerManager) runReinstallation(server *Server, install *Installation
 					case games.GameHytale:
 						// Hytale reinstallation: nothing special needed
 						sm.logger.Info("Hytale server reinstallation completed", "uuid", server.UUID)
+					}
+
+					// Modpack provisioning runs after the loader script so the
+					// pack's mods/configs land on a working base install, and
+					// before the chown below so they get correct ownership.
+					if server.Modpack != nil {
+						if err := sm.provisionModpack(server, serverDir); err != nil {
+							sm.logger.Error("modpack provisioning failed", "uuid", server.UUID, "error", err)
+							setFailed(fmt.Sprintf("Modpack provisioning failed: %v", err))
+							return
+						}
 					}
 
 					// Fix ownership of all files created during reinstallation

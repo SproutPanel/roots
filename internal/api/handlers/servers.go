@@ -41,6 +41,8 @@ type ServerManager struct {
 	mgmtMu       sync.Mutex
 	rconConns    map[string]*minecraft.RCONClient // persistent RCON connections
 	rconMu       sync.Mutex
+	imageOwners  map[string]imageOwner // cached container uid/gid per image (see files.go)
+	imageOwnerMu sync.Mutex
 }
 
 // Server represents a managed game server
@@ -74,6 +76,7 @@ func NewServerManager(docker *docker.Client, cfg *config.Config, logger *slog.Lo
 		consoleConns: make(map[string][]*websocket.Conn),
 		mgmtConns:    make(map[string]*minecraft.ManagementClient),
 		rconConns:    make(map[string]*minecraft.RCONClient),
+		imageOwners:  make(map[string]imageOwner),
 	}
 
 	// Load existing servers from disk

@@ -116,6 +116,7 @@ func (s *Server) setupRouter() {
 					r.Post("/move", s.serverMgr.MoveFile)          // Move file/dir
 					r.Post("/copy", s.serverMgr.CopyFile)          // Copy file/dir
 					r.Post("/chmod", s.serverMgr.ChmodFile)        // Change permissions
+					r.Post("/chown", s.serverMgr.ChownFiles)       // Repair file ownership
 					r.Post("/compress", s.serverMgr.CompressFiles) // Compress files to zip
 					r.Post("/decompress", s.serverMgr.DecompressFile) // Extract zip archive
 				})

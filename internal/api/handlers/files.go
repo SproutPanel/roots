@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,65 @@ import (
 
 	"github.com/go-chi/chi/v5"
 )
+
+// imageOwner is the uid/gid a container image runs as.
+type imageOwner struct {
+	UID int
+	GID int
+}
+
+// serverOwner returns the uid/gid the server's container runs as, cached per
+// image since detection runs a throwaway container.
+func (sm *ServerManager) serverOwner(ctx context.Context, uuid string) (int, int, bool) {
+	sm.mu.RLock()
+	server, ok := sm.servers[uuid]
+	sm.mu.RUnlock()
+	if !ok {
+		return 0, 0, false
+	}
+	image := server.Image
+
+	sm.imageOwnerMu.Lock()
+	owner, cached := sm.imageOwners[image]
+	sm.imageOwnerMu.Unlock()
+	if !cached {
+		uid, gid := sm.docker.GetImageUID(ctx, image)
+		owner = imageOwner{UID: uid, GID: gid}
+		sm.imageOwnerMu.Lock()
+		sm.imageOwners[image] = owner
+		sm.imageOwnerMu.Unlock()
+	}
+	return owner.UID, owner.GID, true
+}
+
+// chownForServer hands ownership of the given paths to the server container's
+// user. The daemon creates files as the user it runs as (typically root), which
+// the container's unprivileged user cannot modify — so every handler that
+// creates files must call this afterwards. Directories are chowned recursively.
+// Failures are logged rather than returned: the write itself already succeeded.
+func (sm *ServerManager) chownForServer(ctx context.Context, uuid string, paths ...string) {
+	if os.Geteuid() != 0 {
+		return // not running as root; files are already owned by our own user
+	}
+	uid, gid, ok := sm.serverOwner(ctx, uuid)
+	if !ok {
+		return
+	}
+	for _, path := range paths {
+		info, err := os.Lstat(path)
+		if err != nil {
+			continue
+		}
+		if info.IsDir() {
+			err = chownRecursive(path, uid, gid)
+		} else {
+			err = os.Lchown(path, uid, gid)
+		}
+		if err != nil {
+			sm.logger.Warn("failed to chown path to server user", "uuid", uuid, "path", path, "uid", uid, "error", err)
+		}
+	}
+}
 
 // FileInfo represents a file or directory
 type FileInfo struct {
@@ -323,6 +383,8 @@ func (sm *ServerManager) WriteFile(w http.ResponseWriter, r *http.Request) {
 
 	// Ensure parent directory exists
 	parentDir := filepath.Dir(fullPath)
+	_, parentErr := os.Stat(parentDir)
+	parentCreated := os.IsNotExist(parentErr)
 	if err := os.MkdirAll(parentDir, 0755); err != nil {
 		http.Error(w, "Failed to create parent directory", http.StatusInternalServerError)
 		return
@@ -333,6 +395,11 @@ func (sm *ServerManager) WriteFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to write file", http.StatusInternalServerError)
 		return
 	}
+
+	if parentCreated {
+		sm.chownForServer(r.Context(), uuid, parentDir)
+	}
+	sm.chownForServer(r.Context(), uuid, fullPath)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -409,6 +476,8 @@ func (sm *ServerManager) CreateFile(w http.ResponseWriter, r *http.Request) {
 		}
 		file.Close()
 	}
+
+	sm.chownForServer(r.Context(), uuid, fullPath)
 
 	w.WriteHeader(http.StatusCreated)
 }
@@ -543,6 +612,8 @@ func (sm *ServerManager) RenameFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to rename", http.StatusInternalServerError)
 		return
 	}
+
+	sm.chownForServer(r.Context(), uuid, newPath)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -706,6 +777,8 @@ func (sm *ServerManager) CompressFiles(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	sm.chownForServer(r.Context(), uuid, destPath)
+
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -831,6 +904,8 @@ func (sm *ServerManager) DecompressFile(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	sm.chownForServer(r.Context(), uuid, destPath)
+
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -952,6 +1027,8 @@ func (sm *ServerManager) MoveFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sm.chownForServer(r.Context(), uuid, newPath)
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1024,6 +1101,75 @@ func (sm *ServerManager) ChmodFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ChownFilesRequest is the request body for repairing file ownership
+type ChownFilesRequest struct {
+	Path string `json:"path"`
+}
+
+// ChownFiles handles POST /api/servers/{uuid}/files/chown
+// It recursively resets ownership of the given path (default: the whole server
+// directory) to the uid/gid the server's container runs as, repairing files
+// that ended up owned by another user (e.g. root).
+func (sm *ServerManager) ChownFiles(w http.ResponseWriter, r *http.Request) {
+	uuid := chi.URLParam(r, "uuid")
+	serverDir := filepath.Join(sm.config.Storage.Servers, uuid)
+
+	// Validate server exists
+	sm.mu.RLock()
+	_, ok := sm.servers[uuid]
+	sm.mu.RUnlock()
+	if !ok {
+		http.Error(w, "Server not found", http.StatusNotFound)
+		return
+	}
+
+	// Body is optional; an empty or missing path means the whole server directory
+	var req ChownFilesRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Path == "" {
+		req.Path = "/"
+	}
+
+	fullPath, err := sm.resolvePath(serverDir, req.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if _, err := os.Stat(fullPath); err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "Path not found", http.StatusNotFound)
+		} else {
+			http.Error(w, "Failed to access path", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	uid, gid, ok := sm.serverOwner(r.Context(), uuid)
+	if !ok {
+		http.Error(w, "Failed to determine server user", http.StatusInternalServerError)
+		return
+	}
+
+	sm.logger.Info("repairing file ownership", "uuid", uuid, "path", req.Path, "uid", uid, "gid", gid)
+	if err := chownRecursive(fullPath, uid, gid); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to change ownership: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	response := struct {
+		Path string `json:"path"`
+		UID  int    `json:"uid"`
+		GID  int    `json:"gid"`
+	}{Path: req.Path, UID: uid, GID: gid}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }
 
 // resolvePath safely resolves a path within the server directory
@@ -1337,6 +1483,8 @@ func (sm *ServerManager) CopyFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	sm.chownForServer(r.Context(), uuid, destPath)
 
 	w.WriteHeader(http.StatusCreated)
 }

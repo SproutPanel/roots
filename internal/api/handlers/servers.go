@@ -798,6 +798,26 @@ func (sm *ServerManager) Power(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Hytale starts can block for a long time (update check, download, device-code
+	// sign-in), well past the panel's HTTP timeout. Run them in the background and
+	// report the outcome through the status callback instead.
+	if server.GameType == games.GameHytale && (req.Action == "start" || req.Action == "restart") {
+		if server.Status == "starting" {
+			http.Error(w, "Server is already starting", http.StatusConflict)
+			return
+		}
+		server.Status = "starting"
+		sm.saveServer(server)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(server)
+
+		go sm.reportStatusToPanel(server.UUID, "starting")
+		go sm.powerHytaleAsync(server, req.Action)
+		return
+	}
+
 	ctx := r.Context()
 	var err error
 
@@ -831,6 +851,37 @@ func (sm *ServerManager) Power(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(server)
+}
+
+// powerHytaleAsync runs a Hytale start/restart outside the request and reports
+// the final status to the panel.
+func (sm *ServerManager) powerHytaleAsync(server *Server, action string) {
+	// startServer applies its own (long) timeout for Hytale
+	ctx := context.Background()
+
+	var err error
+	if action == "restart" {
+		if err = sm.stopServer(ctx, server); err == nil {
+			time.Sleep(1 * time.Second)
+		}
+	}
+	if err == nil {
+		err = sm.startServer(ctx, server)
+	}
+
+	if err != nil {
+		sm.logger.Error("power action failed", "action", action, "uuid", server.UUID, "error", err)
+		// startServer sets install_failed itself when files are missing
+		if server.Status == "starting" || server.Status == "stopping" {
+			server.Status = "offline"
+		}
+		sm.saveServer(server)
+		sm.reportStatusToPanel(server.UUID, server.Status, err.Error())
+		return
+	}
+
+	sm.saveServer(server)
+	sm.reportStatusToPanel(server.UUID, server.Status)
 }
 
 // Reinstall handles POST /api/servers/{uuid}/reinstall
@@ -1081,28 +1132,12 @@ func (sm *ServerManager) runHytaleInstallation(ctx context.Context, server *Serv
 	// Create the downloader client
 	downloader := hytale.NewDownloaderClient(dockerClient, sm.logger)
 
-	// Output callback - broadcasts to console WebSocket and detects auth prompts
-	callback := func(line string, event *gameshytale.ConsoleEvent) {
-		// Log the output
-		sm.logger.Debug("Hytale downloader output", "uuid", server.UUID, "line", line)
-
-		// Broadcast to any connected console WebSocket clients
-		sm.broadcastToConsole(server.UUID, line)
-
-		// Handle auth prompt events
-		if event != nil && event.Type == gameshytale.EventAuthPrompt {
-			sm.logger.Info("Hytale auth required",
-				"uuid", server.UUID,
-				"url", event.URL,
-				"code", event.Code,
-			)
-			// Broadcast auth event to panel
-			sm.broadcastHytaleAuthEvent(server.UUID, event.URL, event.Code, "downloader")
-		}
-	}
+	// Output callback - broadcasts to console WebSocket and reports auth progress to the panel
+	callback, finishAuth := sm.hytaleDownloaderCallback(server.UUID)
 
 	// Run the downloader
 	result, err := downloader.DownloadServer(ctx, serverDir, patchline, callback)
+	finishAuth(err == nil && result.Success)
 	if err != nil {
 		sm.logger.Error("Hytale download failed", "uuid", server.UUID, "error", err)
 		setFailed(fmt.Sprintf("Hytale download failed: %v", err))
@@ -1141,9 +1176,68 @@ func (sm *ServerManager) broadcastToConsole(uuid string, message string) {
 	}
 }
 
-// broadcastHytaleAuthEvent sends a Hytale auth prompt event to the panel
-// This is used when the hytale-downloader or server outputs a device code
-func (sm *ServerManager) broadcastHytaleAuthEvent(serverUUID, url, code, context string) {
+// Hytale auth event names sent to the panel
+const (
+	hytaleAuthRequired = "auth_required"
+	hytaleAuthSuccess  = "auth_success"
+	hytaleAuthFailed   = "auth_failed"
+)
+
+// hytaleDownloaderCallback returns a downloader output callback that logs and
+// broadcasts each line to the console, sends auth_required when a device code is
+// printed and auth_success when the downloader reports a successful login. Call
+// finish with the run's outcome once the downloader is done: if a device code was
+// shown and no success was reported yet, it sends auth_success or auth_failed.
+func (sm *ServerManager) hytaleDownloaderCallback(serverUUID string) (hytale.OutputCallback, func(succeeded bool)) {
+	promptSeen := false
+	successSent := false
+
+	callback := func(line string, event *gameshytale.ConsoleEvent) {
+		sm.logger.Debug("Hytale downloader output", "uuid", serverUUID, "line", line)
+		sm.broadcastToConsole(serverUUID, line)
+
+		// The install script only extracts after the downloader got past auth
+		if promptSeen && !successSent && strings.HasPrefix(line, "Extracting server files") {
+			successSent = true
+			sm.broadcastHytaleAuthEvent(serverUUID, hytaleAuthSuccess, "", "", "downloader")
+		}
+
+		if event == nil {
+			return
+		}
+		switch event.Type {
+		case gameshytale.EventAuthPrompt:
+			sm.logger.Info("Hytale auth required", "uuid", serverUUID, "url", event.URL, "code", event.Code)
+			promptSeen = true
+			successSent = false
+			sm.broadcastHytaleAuthEvent(serverUUID, hytaleAuthRequired, event.URL, event.Code, "downloader")
+		case gameshytale.EventAuthSuccess:
+			if promptSeen && !successSent {
+				successSent = true
+				sm.broadcastHytaleAuthEvent(serverUUID, hytaleAuthSuccess, "", "", "downloader")
+			}
+		}
+	}
+
+	finish := func(succeeded bool) {
+		if !promptSeen || successSent {
+			return
+		}
+		if succeeded {
+			sm.broadcastHytaleAuthEvent(serverUUID, hytaleAuthSuccess, "", "", "downloader")
+		} else {
+			sm.broadcastHytaleAuthEvent(serverUUID, hytaleAuthFailed, "", "", "downloader")
+		}
+		successSent = true // only report the outcome once
+	}
+
+	return callback, finish
+}
+
+// broadcastHytaleAuthEvent sends a Hytale auth event (auth_required, auth_success
+// or auth_failed) to the panel. It is used when the hytale-downloader or server
+// prints a device code and when that login completes or fails.
+func (sm *ServerManager) broadcastHytaleAuthEvent(serverUUID, eventName, url, code, context string) {
 	// Send to panel via callback endpoint
 	if sm.config.Panel.URL == "" || sm.config.Panel.Token == "" {
 		sm.logger.Debug("skipping Hytale auth event - no panel configured")
@@ -1152,7 +1246,7 @@ func (sm *ServerManager) broadcastHytaleAuthEvent(serverUUID, url, code, context
 
 	callbackURL := fmt.Sprintf("%s/api/internal/servers/%s/hytale/auth_event", sm.config.Panel.URL, serverUUID)
 	payload := map[string]string{
-		"event":   "auth_required",
+		"event":   eventName,
 		"url":     url,
 		"code":    code,
 		"context": context, // "downloader" or "server"
@@ -1179,7 +1273,7 @@ func (sm *ServerManager) broadcastHytaleAuthEvent(serverUUID, url, code, context
 	if resp.StatusCode >= 400 {
 		sm.logger.Error("Hytale auth event callback failed", "status", resp.StatusCode, "server", serverUUID)
 	} else {
-		sm.logger.Info("Hytale auth event sent to panel", "server", serverUUID, "code", code)
+		sm.logger.Info("Hytale auth event sent to panel", "server", serverUUID, "event", eventName, "code", code)
 	}
 }
 
@@ -1201,19 +1295,9 @@ func (sm *ServerManager) checkAndApplyHytaleUpdate(ctx context.Context, server *
 	}
 
 	// Callback for output and auth detection
-	callback := func(line string, event *gameshytale.ConsoleEvent) {
-		sm.logger.Debug("Hytale update output", "uuid", server.UUID, "line", line)
-		sm.broadcastToConsole(server.UUID, line)
-
-		if event != nil && event.Type == gameshytale.EventAuthPrompt {
-			sm.logger.Info("Hytale auth required during update",
-				"uuid", server.UUID,
-				"url", event.URL,
-				"code", event.Code,
-			)
-			sm.broadcastHytaleAuthEvent(server.UUID, event.URL, event.Code, "downloader")
-		}
-	}
+	callback, finishAuth := sm.hytaleDownloaderCallback(server.UUID)
+	succeeded := false
+	defer func() { finishAuth(succeeded) }()
 
 	// Check if we have an installed version - if not, we need to download
 	installedVersion, _ := downloader.GetInstalledVersion(serverDir)
@@ -1223,7 +1307,7 @@ func (sm *ServerManager) checkAndApplyHytaleUpdate(ctx context.Context, server *
 		sm.logger.Info("Checking for Hytale updates", "uuid", server.UUID, "installed_version", installedVersion)
 		sm.broadcastToConsole(server.UUID, fmt.Sprintf("Checking for updates (current: %s)...", installedVersion))
 
-		updateAvailable, latestVersion, err := downloader.CheckUpdate(ctx, serverDir, callback)
+		updateAvailable, latestVersion, err := downloader.CheckUpdate(ctx, serverDir, patchline, callback)
 		if err != nil {
 			sm.logger.Warn("Failed to check for Hytale updates", "uuid", server.UUID, "error", err)
 			sm.broadcastToConsole(server.UUID, "Update check failed, continuing with current version")
@@ -1231,6 +1315,7 @@ func (sm *ServerManager) checkAndApplyHytaleUpdate(ctx context.Context, server *
 		}
 
 		if !updateAvailable {
+			succeeded = true
 			sm.logger.Info("Hytale server is up to date", "uuid", server.UUID, "version", installedVersion)
 			sm.broadcastToConsole(server.UUID, fmt.Sprintf("Server is up to date (version: %s)", installedVersion))
 			return nil
@@ -1252,6 +1337,7 @@ func (sm *ServerManager) checkAndApplyHytaleUpdate(ctx context.Context, server *
 	if !result.Success {
 		return fmt.Errorf("download failed: %s", result.Error)
 	}
+	succeeded = true
 
 	// Update version if changed
 	if result.Version != "" && result.Version != server.Version {
@@ -1272,9 +1358,10 @@ func (sm *ServerManager) checkAndApplyHytaleUpdate(ctx context.Context, server *
 
 func (sm *ServerManager) startServer(ctx context.Context, server *Server) error {
 	// For Hytale servers, use a longer timeout since update checks require Docker operations
+	// and may wait on a device code login (valid for 15 minutes) plus a multi-GB download
 	if server.GameType == games.GameHytale {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(context.Background(), 10*time.Minute)
+		ctx, cancel = context.WithTimeout(context.Background(), hytale.DownloaderTimeout+5*time.Minute)
 		defer cancel()
 	}
 
@@ -1313,6 +1400,11 @@ func (sm *ServerManager) startServer(ctx context.Context, server *Server) error 
 			}
 		} else {
 			sm.logger.Info("Hytale auto-update disabled, starting with current version", "uuid", server.UUID)
+		}
+
+		// Apply panel settings (e.g. MAX_PLAYERS) to config.json while the server is stopped
+		if err := gameshytale.SyncServerConfig(serverDir, server.Env); err != nil {
+			sm.logger.Warn("failed to sync Hytale config.json", "uuid", server.UUID, "error", err)
 		}
 	}
 
@@ -2258,8 +2350,15 @@ func (sm *ServerManager) CheckHytaleUpdate(w http.ResponseWriter, r *http.Reques
 	// Get current version
 	currentVersion, _ := downloader.GetInstalledVersion(serverDir)
 
+	patchline := server.Env["HYTALE_PATCHLINE"]
+	if patchline == "" {
+		patchline = "release"
+	}
+
 	// Check for update
-	hasUpdate, latestVersion, err := downloader.CheckUpdate(r.Context(), serverDir, nil)
+	callback, finishAuth := sm.hytaleDownloaderCallback(uuid)
+	hasUpdate, latestVersion, err := downloader.CheckUpdate(r.Context(), serverDir, patchline, callback)
+	finishAuth(err == nil)
 
 	response := HytaleUpdateCheckResponse{
 		UpdateAvailable: hasUpdate,
@@ -2327,17 +2426,11 @@ func (sm *ServerManager) ApplyHytaleUpdate(w http.ResponseWriter, r *http.Reques
 		patchline = "release"
 	}
 
-	// Callback for output
-	callback := func(line string, event *gameshytale.ConsoleEvent) {
-		sm.logger.Debug("Hytale update output", "uuid", uuid, "line", line)
-		sm.broadcastToConsole(uuid, line)
-
-		if event != nil && event.Type == gameshytale.EventAuthPrompt {
-			sm.broadcastHytaleAuthEvent(uuid, event.URL, event.Code, "downloader")
-		}
-	}
+	// Callback for output and auth detection
+	callback, finishAuth := sm.hytaleDownloaderCallback(uuid)
 
 	result, err := downloader.DownloadServer(r.Context(), serverDir, patchline, callback)
+	finishAuth(err == nil && result.Success)
 
 	response := HytaleUpdateApplyResponse{
 		Success: result != nil && result.Success,

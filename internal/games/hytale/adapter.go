@@ -18,8 +18,8 @@ type Adapter struct {
 // HytaleConfig returns the default configuration for Hytale servers
 func HytaleConfig() *games.GameConfig {
 	return &games.GameConfig{
-		Type:        games.GameHytale,
-		DefaultPort: 5520, // Hytale's default server port
+		Type:          games.GameHytale,
+		DefaultPort:   5520, // Hytale's default server port
 		ProtocolPorts: map[string]int{
 			// Hytale may add query/rcon-like protocols in the future
 		},
@@ -40,42 +40,53 @@ func HytaleConfig() *games.GameConfig {
 type ConsoleEventType string
 
 const (
-	EventAuthPrompt   ConsoleEventType = "auth_prompt"
-	EventAuthSuccess  ConsoleEventType = "auth_success"
-	EventAuthFailed   ConsoleEventType = "auth_failed"
-	EventPlayerJoin   ConsoleEventType = "player_join"
-	EventPlayerLeave  ConsoleEventType = "player_leave"
-	EventServerReady  ConsoleEventType = "server_ready"
-	EventUnknown      ConsoleEventType = "unknown"
+	EventAuthPrompt  ConsoleEventType = "auth_prompt"
+	EventAuthSuccess ConsoleEventType = "auth_success"
+	EventAuthFailed  ConsoleEventType = "auth_failed"
+	EventPlayerJoin  ConsoleEventType = "player_join"
+	EventPlayerLeave ConsoleEventType = "player_leave"
+	EventServerReady ConsoleEventType = "server_ready"
+	EventUnknown     ConsoleEventType = "unknown"
 )
 
 // ConsoleEvent represents a parsed console output event
 type ConsoleEvent struct {
 	Type    ConsoleEventType `json:"type"`
 	Raw     string           `json:"raw"`
-	URL     string           `json:"url,omitempty"`      // For auth_prompt
-	Code    string           `json:"code,omitempty"`     // For auth_prompt (device code)
-	Player  string           `json:"player,omitempty"`   // For player events
-	Message string           `json:"message,omitempty"`  // Additional context
+	URL     string           `json:"url,omitempty"`     // For auth_prompt
+	Code    string           `json:"code,omitempty"`    // For auth_prompt (device code)
+	Player  string           `json:"player,omitempty"`  // For player events
+	Message string           `json:"message,omitempty"` // Additional context
 }
 
 // Console output patterns
+//
+// Server output (from the Hytale server manual):
+//
+//	Visit: https://accounts.hytale.com/device
+//	Enter code: ABCD-1234
+//	Or visit: https://accounts.hytale.com/device?user_code=ABCD-1234
+//
+// The downloader uses https://oauth.accounts.hytale.com/oauth2/device/verify.
+// The code can be 8 alphanumeric chars (e.g. UCsd9vaU) or XXXX-YYYY (e.g. ABCD-1234).
+const (
+	authURLExpr  = `https?://(?:oauth\.)?accounts\.hytale\.com/\S*device\S*`
+	authCodeExpr = `([A-Za-z0-9]{4,12}(?:-[A-Za-z0-9]{4,12})?)\b`
+	// "code" must be its own word and be introduced as a code (e.g. "Enter code ABCD",
+	// "Authorization code: ABCD", "code: ABCD") so words like "Codec" never match
+	authCodeLeadExpr = `(?:\b(?:enter|user|device|authori[sz]ation)\s+code\b\s*[:=]?|\bcode\s*[:=])\s*`
+)
+
 var (
-	// Pattern: "Visit https://accounts.hytale.com/device and enter code: XXXX-YYYY" (single line)
-	// The code can be:
-	//   - 8 alphanumeric chars (e.g., UCsd9vaU)
-	//   - XXXX-YYYY format (e.g., ABCD-1234)
-	authPromptPattern = regexp.MustCompile(`(?i)(?:visit|URL)[:\s]*(https?://[^\s]+)[^\n]*(?:enter\s+)?code[:\s]*([A-Za-z0-9]{4,12}(?:-[A-Za-z0-9]{4})?)`)
+	// Single line: "Visit https://accounts.hytale.com/device and enter code: XXXX-YYYY"
+	authPromptPattern = regexp.MustCompile(`(?i)\b(?:visit|url|open)\b[:\s]*(` + authURLExpr + `).*?` + authCodeLeadExpr + authCodeExpr)
 
-	// Multi-line patterns - URL might be on its own line
-	// Matches standalone Hytale OAuth URLs like:
-	//   https://oauth.accounts.hytale.com/oauth2/device/verify?user_code=y6CiAccs
-	//   https://oauth.accounts.hytale.com/oauth2/device/verify
-	authURLPattern = regexp.MustCompile(`(https?://[^\s]*hytale\.com[^\s]*)`)
+	// Multi-line: the device URL on its own line, possibly carrying ?user_code=
+	authURLPattern = regexp.MustCompile(`(?i)(` + authURLExpr + `)`)
 
-	// Matches "Authorization code: xxx" or just a code with user_code param in URL
-	authCodePattern   = regexp.MustCompile(`(?i)(?:authorization\s+)?code[:\s]*([A-Za-z0-9]{4,12}(?:-[A-Za-z0-9]{4})?)`)
-	authURLCodePattern = regexp.MustCompile(`[?&]user_code=([A-Za-z0-9]{4,12}(?:-[A-Za-z0-9]{4})?)`)
+	// Multi-line: the code on its own line, e.g. "Enter code: ABCD-1234"
+	authCodePattern    = regexp.MustCompile(`(?i)` + authCodeLeadExpr + authCodeExpr)
+	authURLCodePattern = regexp.MustCompile(`[?&]user_code=([A-Za-z0-9]{4,12}(?:-[A-Za-z0-9]{4,12})?)`)
 
 	// Auth success/failure patterns
 	authSuccessPattern = regexp.MustCompile(`(?i)authentication\s+successful`)
@@ -283,14 +294,26 @@ func ParseConsoleLine(line string) *ConsoleEvent {
 	return nil
 }
 
+// authPromptMaxGap is how many lines a partial auth prompt (URL or code) is kept
+// waiting for its other half before being discarded
+const authPromptMaxGap = 5
+
 // AuthPromptTracker helps combine multi-line auth prompts into a single event
 type AuthPromptTracker struct {
 	pendingURL  string
 	pendingCode string
+	linesSince  int // lines seen since the pending URL/code was set
 }
 
 // ProcessLine processes a line and returns a complete auth event if found
 func (t *AuthPromptTracker) ProcessLine(line string) *ConsoleEvent {
+	if t.pendingURL != "" || t.pendingCode != "" {
+		t.linesSince++
+		if t.linesSince > authPromptMaxGap {
+			t.Reset()
+		}
+	}
+
 	event := ParseConsoleLine(line)
 	if event == nil {
 		return nil
@@ -304,11 +327,13 @@ func (t *AuthPromptTracker) ProcessLine(line string) *ConsoleEvent {
 	// Track URL if we got one
 	if event.URL != "" {
 		t.pendingURL = event.URL
+		t.linesSince = 0
 	}
 
 	// Track code if we got one
 	if event.Code != "" {
 		t.pendingCode = event.Code
+		t.linesSince = 0
 	}
 
 	// If we have both, return complete event and reset
@@ -319,8 +344,7 @@ func (t *AuthPromptTracker) ProcessLine(line string) *ConsoleEvent {
 			URL:  t.pendingURL,
 			Code: t.pendingCode,
 		}
-		t.pendingURL = ""
-		t.pendingCode = ""
+		t.Reset()
 		return completeEvent
 	}
 
@@ -332,6 +356,7 @@ func (t *AuthPromptTracker) ProcessLine(line string) *ConsoleEvent {
 func (t *AuthPromptTracker) Reset() {
 	t.pendingURL = ""
 	t.pendingCode = ""
+	t.linesSince = 0
 }
 
 // Ensure Adapter implements games.GameAdapter

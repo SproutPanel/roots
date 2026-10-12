@@ -12,8 +12,13 @@ func TestParseVersionLine(t *testing.T) {
 		"Saved version: 2026.01.13-dcad8778f":                      "2026.01.13-dcad8778f",
 		"Extracting server files from 2026.01.13-dcad8778f.zip...": "2026.01.13-dcad8778f",
 		"A new version of hytale-downloader is available: 2026.01.31-abc1234 (current: 2026.01.15-def5678)": "",
-		"Running hytale-downloader...": "",
-		"Checking version: unknown":    "",
+		"Running hytale-downloader...":                                "",
+		"Checking version: unknown":                                   "",
+		`successfully downloaded "release" patchline (version 0.7.0)`: "0.7.0",
+		"0.7.0":                  "0.7.0",
+		"Saved version: 0.7.0":   "0.7.0",
+		"validating checksum...": "",
+		"Downloading 42.5 MB":    "",
 	}
 	for line, want := range tests {
 		if got := parseVersionLine(line); got != want {
@@ -38,8 +43,11 @@ func TestBuildScript(t *testing.T) {
 	d := &DownloaderClient{}
 
 	download := d.buildScript(modeDownload, "pre-release")
-	if !strings.Contains(download, "-skip-update-check -patchline pre-release") {
-		t.Error("download script should skip the self-update check and pass the patchline")
+	if !strings.Contains(download, "-skip-update-check -download-path hytale-server.zip -patchline pre-release") {
+		t.Error("download script should skip the self-update check, use a fixed zip name and pass the patchline")
+	}
+	if strings.Contains(download, "%!") {
+		t.Error("download script has a bad format verb")
 	}
 	if !strings.Contains(download, "Extracting server files") {
 		t.Error("download script should extract the server zip")

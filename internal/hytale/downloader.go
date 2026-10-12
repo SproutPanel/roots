@@ -118,12 +118,23 @@ const (
 	modeDownload     = "download"
 	modePrintVersion = "print-version"
 
+	// serverZip is where the downloader saves the game archive in download mode
+	serverZip = "hytale-server.zip"
+
 	// errorTailLines is how many trailing output lines are kept for error reports
 	errorTailLines = 20
 )
 
-// versionPattern matches Hytale game versions like "2026.01.22-6f8bdbdc4"
-var versionPattern = regexp.MustCompile(`\b(\d{4}\.\d{2}\.\d{2}-[0-9a-f]+)\b`)
+// Hytale versions have used several formats ("2026.01.22-6f8bdbdc4", "0.7.0"),
+// so match on where the version appears rather than its exact shape.
+var (
+	// "(version 0.7.0)", "version: 0.7.0", "Saved version: 2026.01.13-dcad8778f"
+	labeledVersionPattern = regexp.MustCompile(`(?i)\bversion[:\s]+v?(\d+(?:\.\d+)+(?:-[0-9A-Za-z.]+)?)`)
+	// a line that is only a version, as printed by -print-version
+	bareVersionPattern = regexp.MustCompile(`^v?(\d+(?:\.\d+)+(?:-[0-9A-Za-z.]+)?)$`)
+	// date-stamped versions anywhere in a line (older downloader output)
+	datedVersionPattern = regexp.MustCompile(`\b(\d{4}\.\d{2}\.\d{2}-[0-9a-f]+)\b`)
+)
 
 // parseVersionLine extracts a game version from a line of downloader output.
 // Lines about hytale-downloader itself (e.g. its self-update notice) are ignored.
@@ -131,7 +142,12 @@ func parseVersionLine(line string) string {
 	if strings.Contains(strings.ToLower(line), "hytale-downloader") {
 		return ""
 	}
-	if m := versionPattern.FindStringSubmatch(line); m != nil {
+	for _, p := range []*regexp.Regexp{labeledVersionPattern, datedVersionPattern} {
+		if m := p.FindStringSubmatch(line); m != nil {
+			return m[1]
+		}
+	}
+	if m := bareVersionPattern.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
 		return m[1]
 	}
 	return ""
@@ -143,6 +159,9 @@ func (d *DownloaderClient) buildScript(mode, patchline string) string {
 	downloaderArgs := "-skip-update-check"
 	if mode == modePrintVersion {
 		downloaderArgs += " -print-version"
+	} else {
+		// A fixed name so extraction doesn't depend on the downloader's naming scheme
+		downloaderArgs += " -download-path " + serverZip
 	}
 	if arg := d.buildPatchlineArg(patchline); arg != "" {
 		downloaderArgs += " " + arg
@@ -202,6 +221,8 @@ run_downloader() {
     return "$rc"
 }
 
+# a leftover archive from an interrupted run must not be mistaken for a fresh one
+rm -f %[6]s
 run_downloader
 rc=$?
 
@@ -235,40 +256,40 @@ if [ "$rc" -ne 0 ]; then
     rm -f .hytale-downloader.log
     exit "$rc"
 fi
+# e.g. 'successfully downloaded "release" patchline (version 0.7.0)'
+dl_version=$(sed -n 's/.*(version \([^)]*\)).*/\1/p' .hytale-downloader.log | tail -n 1)
 rm -f .hytale-downloader.log
-`, DownloaderBinary, DownloaderURL, downloaderArgs, patchlineOrDefault(patchline), authErrorPattern)
+`, DownloaderBinary, DownloaderURL, downloaderArgs, patchlineOrDefault(patchline), authErrorPattern, serverZip)
 
 	if mode == modeDownload {
 		script += `
-# Extract the downloaded server zip. The downloader names it after the version,
-# e.g. "2026.01.13-dcad8778f.zip"; the newest sorts last.
-newest_zip=""
-for f in [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-*.zip; do
-    [ -f "$f" ] && newest_zip="$f"
-done
-
-if [ -z "$newest_zip" ]; then
-    echo "[Sprout] ERROR: hytale-downloader finished but no server zip was found"
+# Extract the downloaded server zip
+if [ ! -f ` + serverZip + ` ]; then
+    echo "[Sprout] ERROR: hytale-downloader finished but ` + serverZip + ` was not found"
     exit 23
 fi
 
-echo "Extracting server files from $newest_zip..."
-if ! unzip -o -q "$newest_zip"; then
-    echo "[Sprout] ERROR: failed to extract $newest_zip (is the node out of disk space?)"
+echo "Extracting server files from ` + serverZip + `..."
+if ! unzip -o -q ` + serverZip + `; then
+    echo "[Sprout] ERROR: failed to extract ` + serverZip + ` (is the node out of disk space?)"
     exit 24
 fi
 if [ ! -f Server/HytaleServer.jar ]; then
-    echo "[Sprout] ERROR: $newest_zip did not contain Server/HytaleServer.jar"
+    echo "[Sprout] ERROR: ` + serverZip + ` did not contain Server/HytaleServer.jar"
     exit 25
 fi
 echo "Server files extracted successfully"
 
-version="${newest_zip%.zip}"
-echo "$version" > .hytale_version
-echo "Saved version: $version"
+if [ -n "$dl_version" ]; then
+    echo "$dl_version" > .hytale_version
+    echo "Saved version: $dl_version"
+fi
 
-# The zips are several GB each and no longer needed once extracted
-for f in [0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-*.zip; do
+# The zips are several GB and no longer needed once extracted. Also clear zips
+# left by older runs that used the downloader's own version-based names
+# (e.g. "2026.01.13-dcad8778f.zip", "0.7.0.zip"); Assets.zip is kept.
+rm -f ` + serverZip + `
+for f in [0-9]*.zip; do
     [ -f "$f" ] && rm -f "$f"
 done
 true
